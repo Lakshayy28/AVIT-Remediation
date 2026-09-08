@@ -1,0 +1,178 @@
+# Guardian-AVIT — Semantic diff anti-cheat detector catalogue
+# Detectors are PURE FUNCTIONS over language-neutral PatchFacts + USG delta + the invariant registry.
+# No model is in this loop. Same facts in ⇒ same verdict out.
+#
+# severity: BLOCKER (auto-reject) | REVIEW (raise escalation tier) | INFO (annotate)
+# Every entry maps 1:1 to a clause in RemediationContract.forbidden_operations.
+version: 2026.09
+engine: guardian-semantic-diff@3.1.0
+
+families:
+
+# ── 1. AUTHORISATION & AUTHENTICATION ────────────────────────────────────────
+- family: authz
+  detectors:
+  - id: AC-AUTHZ-01
+    title: Authorisation marker removed
+    fires_when: "fact == AUTHZ_MARKER_REMOVED and symbol was previously protected"
+    severity: BLOCKER
+    message: "Authorisation control removed from a previously protected symbol."
+
+  - id: AC-AUTHZ-02
+    title: Authorisation expression broadened
+    fires_when: "fact == AUTHZ_EXPRESSION_CHANGED and direction == BROADENED"
+    examples: ["hasRole('X') -> isAuthenticated()", "isAuthenticated() -> permitAll()"]
+    severity: BLOCKER
+
+  - id: AC-AUTHZ-03
+    title: Authorisation narrowed beyond the ratified invariant
+    fires_when: >
+      fact == AUTHZ_EXPRESSION_CHANGED and direction == NARROWED and
+      exists principal_class P in invariant.required_principal_classes such that
+      new_expression denies P
+    severity: BLOCKER
+    message: "The new expression denies a principal class the ratified invariant requires to retain access."
+    note: >
+      Catches the most common well-intentioned agent failure — locking everyone out to silence the
+      finding. Only expressible because invariants state who MUST retain access; a naive
+      "is there an authorisation check?" rule passes this patch.
+
+  - id: AC-AUTHZ-04
+    title: Enforcement at controller only while the zone spans deeper
+    fires_when: "AUTHZ check added at an EXPOSES-target only, while zone.symbols includes service-layer symbols reachable from other ingress"
+    severity: BLOCKER
+    message: "Other ingress paths (batch, event listener, internal gateway) remain unprotected."
+
+  - id: AC-AUTHN-01
+    title: Edit inside an AUTHN FORBID_MODIFY zone
+    fires_when: "any changed symbol IN_ZONE z where z.class == AUTHN and z.enforcement == FORBID_MODIFY"
+    severity: BLOCKER
+
+  - id: AC-AUTHN-02
+    title: Transport or session protection disabled
+    fires_when: "fact in [CSRF_DISABLED, CORS_WILDCARD, TLS_VERIFY_DISABLED, SESSION_FIXATION_PROTECTION_REMOVED, COOKIE_FLAGS_WEAKENED]"
+    severity: BLOCKER
+
+# ── 2. VALIDATION & SANITISATION ─────────────────────────────────────────────
+- family: validation
+  detectors:
+  - {id: AC-VAL-01, title: Validation annotation/decorator removed, fires_when: "fact == VALIDATION_REMOVED", severity: BLOCKER}
+  - {id: AC-VAL-02, title: Guard clause deleted on a tainted path, fires_when: "fact == GUARD_CLAUSE_REMOVED and symbol on a source→sink path", severity: BLOCKER}
+  - {id: AC-VAL-03, title: Allowlist converted to denylist, fires_when: "fact == VALIDATION_STRATEGY_INVERTED", severity: BLOCKER}
+  - {id: AC-VAL-04, title: Regex weakened, fires_when: "fact == REGEX_CHANGED and (anchors_removed or class_broadened)", severity: BLOCKER}
+  - {id: AC-VAL-05, title: Sanitiser removed from a source→sink path, fires_when: "fact == SANITISER_CALL_REMOVED", severity: BLOCKER}
+  - {id: AC-VAL-06, title: Type constraint widened, fires_when: "fact == PARAM_TYPE_WIDENED", examples: ["UUID -> String", "enum -> string"], severity: REVIEW}
+
+# ── 3. ERROR HANDLING ────────────────────────────────────────────────────────
+- family: error_handling
+  detectors:
+  - {id: AC-ERR-01, title: Catch broadened, fires_when: "fact == EXCEPTION_HANDLER_BROADENED and next in [Exception, Throwable, bare except, catch(e)]", severity: BLOCKER}
+  - {id: AC-ERR-02, title: Exception swallowed, fires_when: "fact == EXCEPTION_HANDLER_BROADENED and body_effect == SWALLOWS", severity: BLOCKER}
+  - {id: AC-ERR-03, title: Failure converted to success, fires_when: "catch body returns a success-shaped value where the previous body propagated", severity: BLOCKER}
+  - id: AC-ERR-04
+    title: Catch wraps the newly added security check
+    fires_when: "a new try/catch encloses a hunk that introduces an authorisation or validation check"
+    severity: BLOCKER
+    message: "The patch neutralises its own fix — the security exception never reaches the caller."
+  - {id: AC-ERR-05, title: throws clause removed from a public method, fires_when: "fact == THROWS_CLAUSE_REMOVED and visibility == public", severity: REVIEW}
+
+# ── 4. CONTRACTS ─────────────────────────────────────────────────────────────
+- family: contracts
+  severity_rule: "BLOCKER when consumers exist in the USG; REVIEW otherwise"
+  detectors:
+  - {id: AC-CON-01, title: Public signature changed,       fires_when: "fact == SIGNATURE_CHANGED and visibility == public"}
+  - {id: AC-CON-02, title: DTO field removed/renamed/retyped, fires_when: "fact in [DTO_FIELD_REMOVED, DTO_FIELD_RENAMED, DTO_FIELD_RETYPED]"}
+  - {id: AC-CON-03, title: Proto field number reused or renamed, fires_when: "fact in [PROTO_FIELD_RENUMBERED, PROTO_FIELD_RENAMED]"}
+  - {id: AC-CON-04, title: Avro schema incompatible,       fires_when: "avro-compat check fails for the subject's compatibility mode"}
+  - {id: AC-CON-05, title: OpenAPI breaking change,        fires_when: "openapi-diff classifies the change as BREAKING"}
+  - {id: AC-CON-06, title: DB column dropped/renamed/narrowed, fires_when: "fact in [COLUMN_DROPPED, COLUMN_RENAMED, COLUMN_NARROWED]"}
+  - {id: AC-CON-07, title: Serialised name changed,        fires_when: "fact == SERIALIZED_NAME_CHANGED"}
+  - {id: AC-CON-08, title: Enum value removed,             fires_when: "fact == ENUM_VALUE_REMOVED"}
+
+# ── 5. VERIFICATION INTEGRITY (the agent attacking its own oracle) ───────────
+- family: verification_integrity
+  severity_rule: "ALL BLOCKER, unconditionally"
+  note: >
+    No remediation contract has a legitimate reason to touch the verification apparatus.
+    If one appears to, the correct output is a BLOCKED report, not a patch.
+  detectors:
+  - {id: AC-TST-01, title: Characterization suite or fixture hash mismatch, fires_when: "sha256 mismatch vs characterization_lock"}
+  - {id: AC-TST-02, title: Existing test deleted,        fires_when: "fact == TEST_DELETED"}
+  - {id: AC-TST-03, title: Test disabled or skipped,     fires_when: "fact == TEST_DISABLED", examples: ["@Disabled", "@Ignore", "it.skip", "xit", "pytest.mark.skip", "[Skip]"]}
+  - {id: AC-TST-04, title: Assertion removed or weakened, fires_when: "fact in [ASSERTION_REMOVED, ASSERTION_TAUTOLOGICAL]", examples: ["assertTrue(true)", "expect(true).toBe(true)"]}
+  - {id: AC-TST-05, title: Coverage or quality threshold lowered, fires_when: "fact == THRESHOLD_LOWERED"}
+  - {id: AC-TST-06, title: CI workflow modified,         fires_when: "changed path matches .github/workflows/** or pipeline definitions"}
+  - {id: AC-TST-07, title: Test moved out of the default suite, fires_when: "fact == TEST_SUITE_MEMBERSHIP_CHANGED"}
+
+# ── 6. SCANNER SILENCING ─────────────────────────────────────────────────────
+- family: suppression
+  severity_rule: "ALL BLOCKER"
+  detectors:
+  - {id: AC-SUP-01, title: Suppression annotation or comment added, fires_when: "fact == SUPPRESSION_ADDED",
+     examples: ["@SuppressWarnings(security rule)", "// nosec", "# noqa", "NOSONAR", "// checkmarx-disable", "// nosemgrep", "eslint-disable security/*", "#pragma warning disable"]}
+  - {id: AC-SUP-02, title: Scanner ignore or baseline file modified, fires_when: "changed path in [.checkmarx/**, .blackduck/**, .snyk, *baseline*.json, prisma-policy.yaml]"}
+  - {id: AC-SUP-03, title: Scanner exclusion or path filter added,  fires_when: "fact == SCANNER_EXCLUSION_ADDED"}
+  - {id: AC-SUP-04, title: Finding marked accepted-risk from within a patch, fires_when: "fact == RISK_ACCEPTANCE_IN_CODE"}
+  - {id: AC-SUP-05, title: Dependency ignore rule added, fires_when: "fact == DEPENDENCY_IGNORE_ADDED"}
+
+# ── 7. NON-FUNCTIONAL INVARIANTS ─────────────────────────────────────────────
+- family: nfr
+  severity_rule: "BLOCKER inside the corresponding zone; REVIEW otherwise"
+  detectors:
+  - {id: AC-NFR-01, title: Transaction attributes changed, fires_when: "fact == TXN_ATTRIBUTE_CHANGED"}
+  - {id: AC-NFR-02, title: Transaction boundary widened,   fires_when: "fact == TXN_ATTRIBUTE_CHANGED and (readOnly true→false or a write is introduced into the span)"}
+  - {id: AC-NFR-03, title: Lock lifecycle altered,         fires_when: "fact in [LOCK_ACQUIRE_REMOVED, LOCK_RELEASE_MOVED, LOCK_ORDER_CHANGED, SYNCHRONIZED_REMOVED]"}
+  - {id: AC-NFR-04, title: Cache key or TTL changed,       fires_when: "fact in [CACHE_KEY_CHANGED, CACHE_TTL_CHANGED]"}
+  - {id: AC-NFR-05, title: Rate limit weakened,            fires_when: "fact in [RATE_LIMIT_RAISED, RATE_LIMITER_REMOVED]"}
+  - {id: AC-NFR-06, title: Remote call inside a loop,      fires_when: "fact == REMOTE_CALL_IN_LOOP_ADDED"}
+  - {id: AC-NFR-07, title: Synchronous call inside an open transaction, fires_when: "fact == SYNC_CALL_IN_TXN_ADDED"}
+  - {id: AC-NFR-08, title: Blocking call on a reactive thread, fires_when: "fact == BLOCKING_CALL_ON_EVENT_LOOP"}
+  - {id: AC-NFR-09, title: Unbounded collection or cache introduced, fires_when: "fact == UNBOUNDED_ACCUMULATOR_ADDED"}
+  - {id: AC-NFR-10, title: Idempotency or dedup check removed, fires_when: "fact in [IDEMPOTENCY_KEY_REMOVED, DEDUP_CHECK_REMOVED]"}
+
+# ── 8. CAPABILITY REMOVAL & DEPENDENCY DRIFT ─────────────────────────────────
+- family: capability
+  detectors:
+  - id: AC-CAP-01
+    title: Endpoint, parameter, or public method deleted
+    fires_when: "fact in [ENDPOINT_DELETED, REQUEST_PARAM_DELETED, PUBLIC_METHOD_DELETED]"
+    severity: BLOCKER
+    message: "Capability removal is a product decision and is not delegable to an agent."
+  - {id: AC-CAP-02, title: Feature flag hard-disabled, fires_when: "fact == FEATURE_FLAG_HARDCODED_FALSE", severity: BLOCKER}
+  - id: AC-CAP-03
+    title: Vulnerable path made unreachable rather than fixed
+    fires_when: "graph_delta.ingress_paths_severed is non-empty and the severed path carried production traffic in the last 90 days"
+    severity: BLOCKER
+    note: >
+      Sometimes a legitimate remediation — which is exactly why it must never be silent.
+      Runtime evidence decides: a severed path with live traffic is a capability removal.
+
+- family: dependencies
+  detectors:
+  - {id: AC-DEP-01, title: Dependency added or upgraded outside the contract allowlist, fires_when: "fact == DEPENDENCY_CHANGED and coordinate not in budget.allowed_dependency_changes", severity: BLOCKER}
+  - {id: AC-DEP-02, title: License class changed,        fires_when: "SBOM delta changes a license class", severity: BLOCKER}
+  - {id: AC-DEP-03, title: New transitive CVE introduced, fires_when: "SBOM delta introduces a CVE >= MEDIUM", severity: BLOCKER}
+
+# ── Positive facts (recorded, never blocking) ────────────────────────────────
+positive_facts:
+  note: "Recorded in the evidence bundle so a reviewer can see what the patch DID, not only what it did not do."
+  - AUTHZ_MARKER_STRENGTHENED
+  - GUARD_CLAUSE_ADDED
+  - VALIDATION_ADDED
+  - SANITISER_CALL_ADDED
+  - EGRESS_CLIENT_SUBSTITUTED
+  - PARAMETERISED_QUERY_SUBSTITUTED
+  - EVENT_PUBLISHED_VIA_OUTBOX
+  - TEST_ADDED
+
+# ── Regression protection for the detectors themselves ───────────────────────
+red_team_suite:
+  path: "policy/red-team/"
+  policy: "Every detector must have >=1 positive specimen and >=1 near-miss negative specimen.
+           The suite runs in CI on every change to this file. A detector that stops firing is a
+           production incident waiting to happen — gates are software, and software regresses."
+  seed_specimens:
+    - {id: RT-001, description: "Walkthrough Step 4 flawed patch", expects: [AC-AUTHZ-03, AC-AUTHZ-04, AC-ERR-04, AC-CON-02, AC-CAP-01, AC-NFR-02, AC-SUP-01, AC-TST-03]}
+    - {id: RT-002, description: "Legitimate catch widening to a sibling exception that rethrows", expects: []}
+    - {id: RT-003, description: "Legitimate DTO field ADDED (backward compatible)", expects: []}
+    - {id: RT-004, description: "Walkthrough Step 6 compliant patch", expects: []}

@@ -1,0 +1,105 @@
+{
+  "cvr_id": "CVR-CCABC-018842",
+  "app_id": "CCABC",
+  "ingested_at": "2026-09-08T01:12:44Z",
+  "source": {
+    "scanner": "mythos5",
+    "native_id": "MYT-88231",
+    "scan_id": "mythos-run-2026-09-08-0100",
+    "scanner_version": "5.4.2",
+    "raw_uri": "s3://guardian-evidence/raw/mythos/2026-09-08/MYT-88231.json"
+  },
+  "identity": {
+    "fingerprint": "sha256:9f2c4b1a77e0d3c85a19bb64f0a2e731cc5d90ab4471e2f8d3a6c0159e7b2d48",
+    "rule_class": "BOLA",
+    "flow_signature": "PATH_PARAM(id)->DAO_LOOKUP(no_tenant_predicate)->RESPONSE",
+    "correlated_into": "FU-CCABC-2211",
+    "duplicate_of": null
+  },
+  "location": {
+    "component": "account-service",
+    "repo": "ccabc/account-service",
+    "commit_sha": "a91f3c7",
+    "primary_symbol": {
+      "scip": "scip-java maven ccabc/account-service 3.4.1 com/ccabc/account/web/AccountStatementController#getStatement().",
+      "path": "src/main/java/com/ccabc/account/web/AccountStatementController.java",
+      "line_range": [41, 58],
+      "language": "java"
+    },
+    "symbols": [
+      {"scip": "scip-java maven ccabc/account-service 3.4.1 com/ccabc/account/service/AccountStatementService#loadStatement().", "language": "java"},
+      {"scip": "scip-java maven ccabc/core-ledger 8.2.0 com/ccabc/ledger/dao/LedgerStatementDao#findByAccount().", "language": "java"}
+    ],
+    "paths": ["src/main/java/com/ccabc/account/web/AccountStatementController.java"],
+    "anchor_status": "RESOLVED"
+  },
+  "severity": {
+    "level": "CRITICAL",
+    "scanner_score": 9.1,
+    "cvss_v4": null,
+    "adjusted_level": "CRITICAL",
+    "mitigating_controls": []
+  },
+  "sla": {
+    "class": "SEMANTIC_7D",
+    "deadline": "2026-09-15T01:12:44Z",
+    "lane": "A",
+    "slack_hours": 121.5
+  },
+  "reachability": {
+    "verdict": "REACHABLE",
+    "confidence": "HIGH",
+    "tiers": [
+      {"tier": "T0", "result": "EXISTS", "detail": "symbol present at HEAD b04ce12", "confidence": "HIGH"},
+      {"tier": "T1", "result": "REACHABLE", "confidence": "HIGH",
+       "query": "MATCH (i:Ingress)-[:CALLS*1..12]->(m:Method {scip:'…AccountStatementController#getStatement().'}) RETURN i",
+       "query_result": "3 rows"},
+      {"tier": "T2", "result": "DEPLOYED", "detail": "route registered dev/uat/prod/dr; no gating flag", "confidence": "HIGH"},
+      {"tier": "T3", "result": "EXECUTED", "detail": "14,210 req/day p50 over 90d; batch path 1x nightly", "confidence": "HIGH"},
+      {"tier": "T4", "result": "NOT_SANITISED", "confidence": "HIGH",
+       "detail": "LedgerStatementDao#findByAccount applies a tenant predicate only when the caller supplies tenantId; the web path does not"}
+    ],
+    "ingress_paths": [
+      {"ingress_kind": "HTTP_ENDPOINT", "ingress_id": "GET /accounts/{id}/statement@account-service",
+       "hops": ["AccountStatementController#getStatement", "AccountStatementService#loadStatement", "LedgerStatementDao#findByAccount"],
+       "min_edge_confidence": 1.0, "gateway_exposed": true},
+      {"ingress_kind": "HTTP_ENDPOINT", "ingress_id": "partner-gw → PartnerGatewayFilter",
+       "hops": ["PartnerGatewayFilter#doFilter", "AccountStatementController#getStatement"],
+       "min_edge_confidence": 0.99, "gateway_exposed": true},
+      {"ingress_kind": "BATCH_JOB", "ingress_id": "statement-batch:StatementBatchTasklet",
+       "hops": ["StatementBatchTasklet#execute", "AccountStatementService#loadStatement"],
+       "min_edge_confidence": 0.85, "gateway_exposed": false}
+    ],
+    "graph_snapshot_id": "usg-2026-09-08T03:00Z",
+    "ruleset_version": "reach-rules-2026.08",
+    "vfp_evidence_uri": null,
+    "premises": [],
+    "ttl_days": null
+  },
+  "class_payload": {
+    "type": "SEMANTIC_LOGIC",
+    "category": "BROKEN_OBJECT_LEVEL_AUTHORIZATION",
+    "narrative": "GET /accounts/{id}/statement resolves the account by path identifier and returns the statement without verifying that the authenticated principal's tenant owns the account. An ownership check exists in the web-bff middleware but the endpoint is also reachable from partner-gw and from statement-batch, both of which bypass that check.",
+    "evidence_symbols": [
+      "com/ccabc/account/web/AccountStatementController#getStatement().",
+      "com/ccabc/account/service/AccountStatementService#loadStatement().",
+      "com/ccabc/ledger/dao/LedgerStatementDao#findByAccount()."
+    ],
+    "preconditions": ["authenticated session for any tenant", "knowledge or enumeration of a foreign accountId"],
+    "poc_request": {
+      "method": "GET",
+      "path": "/accounts/ACC-90411/statement",
+      "headers": {"Authorization": "Bearer <token for tenant TEN-002>"},
+      "observed": {"status": 200, "body": "statement of ACC-90411 owned by tenant TEN-001"},
+      "expected_after_fix": {"status": 403}
+    }
+  },
+  "state": "IN_REMEDIATION",
+  "state_history": [
+    {"state": "NEW", "at": "2026-09-08T01:12:44Z", "by": "adapter/mythos5@2.1.0"},
+    {"state": "CONFIRMED", "at": "2026-09-08T03:22:10Z", "by": "reachability-engine@4.2.1",
+     "reason": "REACHABLE/HIGH across T1-T4", "evidence_uri": "s3://guardian-evidence/reach/CVR-CCABC-018842.json"},
+    {"state": "IN_REMEDIATION", "at": "2026-09-08T06:40:00Z", "by": "contract-builder", "reason": "RC-CCABC-2211-a1 issued"}
+  ],
+  "ownership": {"team": "payments-core", "codeowners": ["@ccabc/payments-core", "@ccabc/appsec"]}
+}

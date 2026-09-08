@@ -1,0 +1,174 @@
+# Guardian-AVIT — High-Invariance Zone discovery rules
+# Signals 1-4 are automatic. Signal 5 (oracle-proposed) requires human ratification
+# and lives in .guardian/invariants/*.yaml in each repository.
+version: 2026.09
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SIGNAL 1 — Declarative markers (deterministic, high precision)
+# ─────────────────────────────────────────────────────────────────────────────
+declarative:
+
+  - zone_class: AUTHN
+    enforcement: FORBID_MODIFY
+    rationale: >
+      Identity establishment. There is no remediation that legitimately requires an
+      autonomous agent to edit the filter chain or a token validator.
+    markers:
+      java:
+        types:       ["*SecurityFilterChain*", "*WebSecurityConfigurer*", "*AuthenticationProvider",
+                      "*JwtDecoder*", "*OAuth2*", "*OidcUserService*", "*SessionAuthenticationStrategy*"]
+        annotations: ["EnableWebSecurity", "EnableMethodSecurity"]
+        paths:       ["**/config/SecurityConfig.java", "**/security/**/*Filter.java"]
+      csharp:
+        types:       ["*AuthenticationHandler", "*JwtBearerOptions*", "*IdentityServer*"]
+        attributes:  ["Authorize"]
+        paths:       ["**/Startup.cs", "**/Program.cs", "**/Auth/**"]
+      typescript:
+        symbols:     ["passport.*", "express-jwt", "*authMiddleware*", "verifyToken*"]
+        paths:       ["**/middleware/auth*.ts", "**/auth/**"]
+      python:
+        symbols:     ["flask_login.*", "fastapi.security.*", "*verify_token*"]
+
+  - zone_class: AUTHZ
+    enforcement: REQUIRE_PROOF
+    rationale: >
+      Access decisions may legitimately change during remediation, but every change must be
+      proved against the ratified principal-class matrix and reviewed by a security architect.
+    markers:
+      java:
+        annotations: ["PreAuthorize", "PostAuthorize", "RolesAllowed", "Secured", "PreFilter", "PostFilter"]
+        types:       ["*AccessDecisionManager*", "*PermissionEvaluator*", "*AccessPolicy", "*AuthorizationManager*"]
+        patterns:    ["method body contains a tenant/owner predicate comparison"]
+      csharp:
+        attributes:  ["Authorize", "AuthorizeFilter"]
+        types:       ["*AuthorizationHandler", "*IAuthorizationRequirement"]
+      typescript:
+        symbols:     ["*requireRole*", "*requireOwner*", "*can(*)", "casl.*", "*abilityFor*"]
+      python:
+        symbols:     ["*has_permission*", "*require_scope*", "casbin.*"]
+    proof_tests_required: ["negative authorisation matrix over all principal classes and all ingress paths"]
+
+  - zone_class: TXN
+    enforcement: REQUIRE_PROOF
+    escalate_to_forbid_when: "zone contains a write to a table also written by another component"
+    markers:
+      java:      {annotations: ["Transactional"], types: ["*TransactionTemplate*", "*PlatformTransactionManager*"]}
+      csharp:    {types: ["TransactionScope", "*IUnitOfWork*", "DbContextTransaction"]}
+      typescript:{symbols: ["*.transaction(", "knex.transaction", "prisma.$transaction"]}
+      python:    {symbols: ["session.begin", "atomic("]}
+    transitive: true    # zone spans the whole propagation subtree, computed at index time
+
+  - zone_class: IDEMPOTENCY
+    enforcement: REQUIRE_PROOF
+    markers:
+      java:      {annotations: ["KafkaListener", "RabbitListener"], types: ["*Outbox*", "*DedupStore*", "*IdempotencyKey*"]}
+      csharp:    {types: ["*IdempotentConsumer*", "*Outbox*"]}
+      typescript:{symbols: ["*idempotencyKey*", "*dedupe*"]}
+
+  - zone_class: CONCURRENCY
+    enforcement: REQUIRE_PROOF
+    markers:
+      java:      {types: ["*DistributedLock*", "*RedisLockRegistry*", "*Curator*"], keywords: ["synchronized", "ReentrantLock"],
+                  sql: ["SELECT * FOR UPDATE"]}
+      csharp:    {keywords: ["lock(", "SemaphoreSlim", "Mutex"]}
+      typescript:{symbols: ["redlock.*", "*acquireLock*"]}
+
+  - zone_class: RATE_LIMIT
+    enforcement: REQUIRE_PROOF
+    markers:
+      java:      {types: ["*Bucket4j*", "*RateLimiter*"], config: ["*.rate-limit.*"]}
+      typescript:{symbols: ["express-rate-limit", "*rateLimiter*"]}
+      python:    {symbols: ["slowapi.*", "*Limiter*"]}
+
+  - zone_class: CONTRACT
+    enforcement: REQUIRE_PROOF
+    markers:
+      any:
+        - "type referenced by an OpenAPI schema"
+        - "type referenced by a .proto message"
+        - "type referenced by an Avro subject"
+        - "type appearing in a Pact interaction"
+        - "public method exposed by an @Endpoint / controller / resolver"
+        - "entity mapped to a table read by another component"
+
+  - zone_class: CRYPTO
+    enforcement: FORBID_MODIFY
+    markers:
+      any: ["*KmsClient*", "*Cipher*", "*KeyStore*", "*Signer*", "*jwtSign*", "crypto.createHmac", "*Encryptor*"]
+
+  - zone_class: PII_PCI
+    enforcement: REQUIRE_PROOF
+    markers:
+      any: ["fields tagged pii/pci in the data classification registry",
+            "*Masker*", "*Tokenizer*", "*Redact*", "columns in the PCI table set"]
+
+  - zone_class: CACHE
+    enforcement: ALLOW_WITH_TEST
+    markers:
+      java:      {annotations: ["Cacheable", "CacheEvict", "CachePut"]}
+      typescript:{symbols: ["*cache.set(", "redis.set"]}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SIGNAL 2 — Structural (unmarked chokepoints no annotation reveals)
+# ─────────────────────────────────────────────────────────────────────────────
+structural:
+  - name: high_fan_in
+    condition: "callers(symbol) >= 25 OR pagerank_percentile(symbol) >= 0.95"
+    zone_class: CONTRACT
+    enforcement: ALLOW_WITH_TEST
+  - name: ingress_choke_point
+    condition: "symbol lies on >= 40% of all ingress→sink paths in its component"
+    zone_class: CONTRACT
+    enforcement: REQUIRE_PROOF
+  - name: shared_library_member
+    condition: "symbol is in an artifact consumed by >= 3 components"
+    zone_class: CONTRACT
+    enforcement: REQUIRE_PROOF
+  - name: cross_component_table_writer
+    condition: "symbol WRITES a table also written by another component"
+    zone_class: TXN
+    enforcement: REQUIRE_PROOF
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SIGNAL 3 — Historical (where breaking things has actually hurt)
+# ─────────────────────────────────────────────────────────────────────────────
+historical:
+  - name: incident_implicated
+    condition: "file appears in the remediation commit of a Sev1/Sev2 incident within 365d"
+    effect: {blast_radius_bonus: 10, enforcement_floor: REQUIRE_PROOF}
+  - name: high_change_failure_rate
+    condition: "change_failure_rate(file, 180d) > 0.15"
+    effect: {blast_radius_bonus: 8}
+  - name: frequently_reverted
+    condition: "revert commits touching file >= 2 within 365d"
+    effect: {blast_radius_bonus: 8, enforcement_floor: REQUIRE_PROOF}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SIGNAL 4 — Organisational
+# ─────────────────────────────────────────────────────────────────────────────
+organisational:
+  - name: security_codeowner
+    condition: "CODEOWNERS assigns the path to a security or architecture team"
+    effect: {enforcement_floor: REQUIRE_PROOF, review_tier_floor: SECURITY_ARCHITECT}
+  - name: compliance_scope
+    condition: "path is tagged SOX or PCI in the compliance registry"
+    effect: {enforcement_floor: REQUIRE_PROOF, review_tier_floor: SECURITY_ARCHITECT, evidence_retention_years: 7}
+  - name: adr_referenced
+    condition: "an ADR references this symbol or path"
+    effect: {attach_adr_to_contract: true}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fusion
+# ─────────────────────────────────────────────────────────────────────────────
+fusion:
+  enforcement_resolution: "strictest wins (FORBID_MODIFY > REQUIRE_PROOF > ALLOW_WITH_TEST)"
+  zone_membership: "a symbol may belong to several zones; all apply"
+  ratification:
+    required_for: ["oracle-proposed invariants", "any relaxation of an existing zone"]
+    approver_by_class:
+      AUTHN:    security-architect
+      AUTHZ:    security-architect
+      CRYPTO:   security-architect
+      PII_PCI:  security-architect + data-protection
+      default:  component-owner
+    note: "No automated path exists for relaxing a zone. Relaxation is a human PR against .guardian/invariants/."

@@ -1,0 +1,285 @@
+{
+  "contract_id": "RC-CCABC-2211-a1",
+  "fix_unit": "FU-CCABC-2211",
+  "batch": "PR-CCABC-017",
+  "attempt": 1,
+  "issued_at": "2026-09-08T06:40:00Z",
+  "expires_at": "2026-09-09T04:00:00Z",
+  "agent": "devin",
+  "leases": [
+    "account-service:src/main/java/com/ccabc/account/web/AccountStatementController.java",
+    "account-service:src/main/java/com/ccabc/account/service/AccountStatementService.java",
+    "account-service:src/main/java/com/ccabc/account/theme/StatementThemeResolver.java"
+  ],
+
+  "objective": {
+    "must_become_true": [
+      {
+        "id": "OBJ-1",
+        "predicate": "GET /accounts/{id}/statement invoked by a principal whose tenant does not own {id} and which does not hold scope LEDGER_READ_ALL returns HTTP 403 — on every ingress path, including direct service invocation and partner-gw.",
+        "proof": "characterization cases negAuth.otherTenant.controller, negAuth.otherTenant.directService, negAuth.wrongScope.partnerGw match expected_delta; G6 negative-auth matrix 18/18"
+      },
+      {
+        "id": "OBJ-2",
+        "predicate": "The value of themeCallbackUrl cannot cause an outbound HTTP request to any host outside the requesting tenant's configured allowlist, including via DNS rebinding or redirect.",
+        "proof": "PartnerThemeIT#rejectsNonAllowlistedHost, #rejectsPrivateIp, #rejectsRedirectToPrivate; G5 Checkmarx SSRF rule clear for StatementThemeResolver; G6 egress proxy observes no outbound connection"
+      }
+    ],
+    "must_remain_true": [
+      {"invariant_id": "INV-CCABC-0031", "enforcement": "REQUIRE_PROOF",
+       "statement": "A statement may be read only by a principal whose tenant owns the account, OR by a principal holding scope LEDGER_READ_ALL (the nightly statement batch).",
+       "proof_test": "AccountStatementCharacterizationTest#negativeAuthMatrix"},
+      {"invariant_id": "INV-CCABC-0038", "enforcement": "REQUIRE_PROOF",
+       "statement": "The ownership check must be enforced at the service layer. partner-gw and statement-batch reach loadStatement without traversing the BFF middleware or the controller.",
+       "proof_test": "AccountStatementServiceTest#directInvocationRejectsForeignTenant"},
+      {"invariant_id": "INV-CCABC-0044", "enforcement": "REQUIRE_PROOF",
+       "statement": "themeCallbackUrl must remain an accepted request parameter. Partner tenant PTNR-7 depends on it for white-label statement rendering (ADR-014).",
+       "proof_test": "pact:web-bff@v3 provider verification + PartnerThemeIT#allowlistedHostRendersTheme"},
+      {"invariant_id": "INV-CCABC-0052", "enforcement": "FORBID_MODIFY",
+       "statement": "loadStatement executes inside a single @Transactional(readOnly=true) span against core-ledger. No write may be introduced into this span and the transaction attributes may not change (ADR-022, lock escalation risk on LEDGER.ACCOUNT_STATEMENT).",
+       "proof_test": "AccountStatementCharacterizationTest#txnSpanReadOnly"},
+      {"invariant_id": "INV-CCABC-0058", "enforcement": "REQUIRE_PROOF",
+       "statement": "StatementRequested (Avro v4) must continue to be published for every statement read; audit-service depends on it for regulatory reporting.",
+       "proof_test": "avro-compat StatementRequested v4 BACKWARD_TRANSITIVE + AccountStatementCharacterizationTest#emitsStatementRequested"}
+    ]
+  },
+
+  "evidence": {
+    "findings": [
+      {"cvr_id": "CVR-CCABC-018842", "scanner": "mythos5", "native_id": "MYT-88231",
+       "summary": "BOLA on GET /accounts/{id}/statement — no tenant ownership verification on the web path",
+       "flow_path": ["AccountStatementController#getStatement", "AccountStatementService#loadStatement", "LedgerStatementDao#findByAccount"],
+       "reproduction": {"method": "GET", "path": "/accounts/ACC-90411/statement",
+                        "headers": {"Authorization": "Bearer <tenant TEN-002 token>"},
+                        "observed": {"status": 200}, "expected_after_fix": {"status": 403}}},
+      {"cvr_id": "CVR-CCABC-018903", "scanner": "checkmarx", "native_id": "CX-441902",
+       "summary": "SSRF — themeCallbackUrl flows unvalidated to RestTemplate#getForObject",
+       "flow_path": ["getStatement(themeCallbackUrl)", "loadStatement", "StatementThemeResolver#fetchTheme", "RestTemplate#getForObject"],
+       "reproduction": {"method": "GET", "path": "/accounts/ACC-11002/statement?themeCallbackUrl=http://169.254.169.254/latest/meta-data/",
+                        "observed": {"outbound_call": "http://169.254.169.254/latest/meta-data/"},
+                        "expected_after_fix": {"status": 400, "outbound_call": null}}}
+    ],
+    "reachability_summary": "Both REACHABLE with HIGH confidence. Three ingress paths to the BOLA (HTTP endpoint, partner-gw filter, statement-batch tasklet). SSRF sink reachable with no sanitiser on path.",
+    "runtime_profile": {
+      "endpoint_req_per_day": 14210,
+      "theme_param_present_pct": 0.31,
+      "theme_param_origin": "100% tenant PTNR-7 (~44 req/day)",
+      "batch_path": "statement-batch nightly, ~2.1M rows, service account scope LEDGER_READ_ALL",
+      "p95_latency_ms": 240
+    }
+  },
+
+  "business_context": [
+    "themeCallbackUrl is a supported white-label feature for partner tenant PTNR-7 (ADR-014), used ~44 times per day. It MUST NOT be removed. Constrain the value instead.",
+    "statement-batch reads statements across ALL tenants nightly using a service account holding scope LEDGER_READ_ALL. Any authorisation rule that denies this account breaks regulatory statement generation.",
+    "The BFF ownership middleware is NOT a control for this endpoint: partner-gw and statement-batch do not traverse it."
+  ],
+
+  "change_surface": {
+    "allow": [
+      "account-service/src/main/java/com/ccabc/account/web/AccountStatementController.java",
+      "account-service/src/main/java/com/ccabc/account/service/AccountStatementService.java",
+      "account-service/src/main/java/com/ccabc/account/theme/StatementThemeResolver.java",
+      "account-service/src/main/java/com/ccabc/account/security/AccountAccessPolicy.java",
+      "account-service/src/test/java/com/ccabc/account/**"
+    ],
+    "deny": [
+      "**/SecurityConfig.java",
+      "**/PartnerGatewayFilter.java",
+      "**/*CharacterizationTest.java",
+      "**/dto/StatementRequest.java",
+      ".guardian/**",
+      ".github/workflows/**",
+      "**/pom.xml",
+      "core-ledger/**",
+      "statement-batch/**"
+    ],
+    "read_only_context": [
+      "core-ledger/src/main/java/com/ccabc/ledger/dao/LedgerStatementDao.java",
+      "statement-batch/src/main/java/com/ccabc/batch/StatementBatchTasklet.java",
+      "account-service/src/main/java/com/ccabc/account/config/SecurityConfig.java",
+      "account-service/src/main/resources/openapi/account-v3.yaml",
+      "account-service/src/main/java/com/ccabc/account/web/TransactionHistoryController.java",
+      "account-service/src/main/java/com/ccabc/account/security/TransactionAccessPolicy.java",
+      "shared-web/src/main/java/com/ccabc/web/UrlAllowlistValidator.java",
+      "docs/adr/ADR-014-partner-theming.md",
+      "docs/adr/ADR-022-ledger-locking.md",
+      "docs/adr/ADR-031-tenant-isolation.md"
+    ],
+    "new_files_permitted": true,
+    "symbol_allow": [
+      "com/ccabc/account/web/AccountStatementController#getStatement().",
+      "com/ccabc/account/service/AccountStatementService#loadStatement().",
+      "com/ccabc/account/theme/StatementThemeResolver#fetchTheme()."
+    ]
+  },
+
+  "forbidden_operations": {
+    "security_controls": [
+      "remove_or_weaken: [PreAuthorize, PostAuthorize, RolesAllowed, Secured]",
+      "modify: [SecurityFilterChain, authentication providers, token validators, CORS, CSRF config]",
+      "broaden: hasRole/hasAuthority -> permitAll|isAuthenticated|anonymous",
+      "narrow beyond INV-CCABC-0031: any expression that denies owner-tenant principals or LEDGER_READ_ALL"
+    ],
+    "validation": ["remove: [Valid, NotNull, Size, Pattern, custom validators]", "weaken: allowlist -> denylist"],
+    "error_handling": [
+      "broaden_catch: specific exception -> Exception/Throwable",
+      "swallow: empty catch body or catch returning a success value",
+      "wrap the newly added authorisation check in any catch block"
+    ],
+    "contracts": [
+      "change public method signatures",
+      "remove/rename/retype DTO fields (StatementRequest, StatementResponse)",
+      "modify OpenAPI request or response schemas in a breaking way",
+      "modify the StatementRequested Avro schema"
+    ],
+    "verification_integrity": [
+      "modify or delete any *CharacterizationTest",
+      "modify .guardian/** or .github/workflows/**",
+      "disable, skip or weaken assertions in any existing test",
+      "lower coverage or quality thresholds"
+    ],
+    "scanner_silencing": [
+      "add SuppressWarnings for security rules, // nosec, NOSONAR, // checkmarx-disable, .snyk entries",
+      "modify scanner exclusion or baseline configuration"
+    ],
+    "non_functional": [
+      "change @Transactional attributes (INV-CCABC-0052 is FORBID_MODIFY)",
+      "introduce a write inside the readOnly transaction span",
+      "change cache keys/TTLs or rate-limit thresholds",
+      "introduce a remote call inside a loop or inside an open transaction"
+    ],
+    "capability_removal": [
+      "delete endpoints, request parameters (specifically themeCallbackUrl), feature flags, or public methods"
+    ],
+    "dependencies": ["add or upgrade any dependency (allowed_dependency_changes is empty; pom.xml is denied and leased by PR-CCABC-041)"]
+  },
+
+  "required_patterns": [
+    {"description": "Authorisation is expressed as a Spring policy bean invoked from the service layer, with a thin @PreAuthorize delegation at the controller for defence in depth. Copy this shape exactly.",
+     "exemplar_symbol": "com/ccabc/account/web/TransactionHistoryController#list(). + com/ccabc/account/security/TransactionAccessPolicy#canRead().",
+     "exemplar_commit": "7f21ab"},
+    {"description": "Outbound URL validation uses the shared UrlAllowlistValidator with per-tenant host allowlists, private/link-local range rejection, post-DNS-resolution recheck and redirects disabled. Reuse it; do not reimplement URL parsing.",
+     "exemplar_symbol": "com/ccabc/web/UrlAllowlistValidator#validate().",
+     "exemplar_commit": "3c92de"},
+    {"description": "Audit records are published through ApplicationEventPublisher into the existing transactional outbox, never written directly inside a readOnly span.",
+     "exemplar_symbol": "com/ccabc/account/service/TransactionHistoryService#list().",
+     "exemplar_commit": "5ba117"}
+  ],
+
+  "invariants": [
+    {"invariant_id": "INV-CCABC-0031", "zone_id": "HIZ-CCABC-0031", "class": "AUTHZ", "enforcement": "REQUIRE_PROOF",
+     "statement": "Owner-tenant OR scope LEDGER_READ_ALL may read a statement.",
+     "proof_tests": ["AccountStatementCharacterizationTest#negativeAuthMatrix"],
+     "ratified_by": "jane.doe@corp (Security Architect)", "version": 3},
+    {"invariant_id": "INV-CCABC-0038", "zone_id": "HIZ-CCABC-0031", "class": "AUTHZ", "enforcement": "REQUIRE_PROOF",
+     "statement": "Enforcement must occur at the service layer, not only the controller.",
+     "proof_tests": ["AccountStatementServiceTest#directInvocationRejectsForeignTenant"],
+     "ratified_by": "jane.doe@corp", "version": 1},
+    {"invariant_id": "INV-CCABC-0044", "zone_id": "HIZ-CCABC-0044", "class": "CONTRACT", "enforcement": "REQUIRE_PROOF",
+     "statement": "themeCallbackUrl remains an accepted request parameter.",
+     "proof_tests": ["pact:web-bff@v3", "PartnerThemeIT#allowlistedHostRendersTheme"],
+     "ratified_by": "sam.okafor@corp (Product Owner)", "version": 1},
+    {"invariant_id": "INV-CCABC-0052", "zone_id": "HIZ-CCABC-0052", "class": "TXN", "enforcement": "FORBID_MODIFY",
+     "statement": "loadStatement stays within one readOnly transaction span; no writes inside it.",
+     "proof_tests": ["AccountStatementCharacterizationTest#txnSpanReadOnly"],
+     "ratified_by": "jane.doe@corp", "version": 2},
+    {"invariant_id": "INV-CCABC-0058", "zone_id": "HIZ-CCABC-0058", "class": "CONTRACT", "enforcement": "REQUIRE_PROOF",
+     "statement": "StatementRequested Avro v4 continues to be published unchanged.",
+     "proof_tests": ["avro-compat:StatementRequested:v4", "AccountStatementCharacterizationTest#emitsStatementRequested"],
+     "ratified_by": "jane.doe@corp", "version": 1}
+  ],
+
+  "characterization_lock": {
+    "suite_path": "account-service/src/test/java/com/ccabc/account/AccountStatementCharacterizationTest.java",
+    "suite_sha256": "4d9ae1c07b3f2a8890c5613de2f4471bb0a9c2d5e6f18734ac0b91de2f5a6c83",
+    "fixtures_sha256": "88c1f0aa93b47e25c6d1180fa7e3c94b2d05e81f6a3c7920bd41e5c8a09f3b26",
+    "case_count": 42,
+    "recorded_against_commit": "a91f3c7",
+    "mutation_score": 0.78,
+    "mount": "READ_ONLY",
+    "dimensions": ["HTTP", "NEGATIVE_AUTH_MATRIX", "EVENTS", "DB_EFFECTS", "TXN_SPANS", "LATENCY", "AUDIT_LOGS"]
+  },
+
+  "expected_delta": {
+    "cases": [
+      {"case_id": "negAuth.otherTenant.controller",
+       "before": {"status": 200, "body_schema": "StatementResponse"},
+       "after": {"status": 403, "body_schema": "ProblemDetail"},
+       "justification": "MYT-88231 — cross-tenant read must be denied"},
+      {"case_id": "negAuth.otherTenant.directService",
+       "before": {"returns": "Statement"},
+       "after": {"throws": "AccessDeniedException"},
+       "justification": "INV-CCABC-0038 — service-layer enforcement"},
+      {"case_id": "negAuth.wrongScope.partnerGw",
+       "before": {"status": 200},
+       "after": {"status": 403},
+       "justification": "MYT-88231 — partner-gw path must also be covered"},
+      {"case_id": "theme.nonAllowlistedHost",
+       "before": {"status": 200, "outbound_call": "http://attacker.example/t.json"},
+       "after": {"status": 400, "outbound_call": null},
+       "justification": "CX-441902 — SSRF egress blocked at validation"},
+      {"case_id": "theme.privateIpHost",
+       "before": {"status": 200, "outbound_call": "http://169.254.169.254/latest/meta-data/"},
+       "after": {"status": 400, "outbound_call": null},
+       "justification": "CX-441902 — link-local metadata endpoint must be rejected"},
+      {"case_id": "theme.redirectToPrivate",
+       "before": {"status": 200, "outbound_call": "https://theme.ptnr7.example/r -> http://10.0.0.5/"},
+       "after": {"status": 400, "outbound_call": null},
+       "justification": "CX-441902 — redirect following disabled"}
+    ],
+    "policy": {"unlisted_case_change": "REJECT", "unmet_expected_delta": "REJECT"}
+  },
+
+  "acceptance": {
+    "gates": ["G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8"],
+    "verification_plan_uri": "s3://guardian-evidence/plans/PR-CCABC-017.yaml",
+    "scanner_reverification": ["mythos:MYT-88231", "checkmarx:CX-441902", "blackduck:no-new", "prisma:no-new"]
+  },
+
+  "workspace": {
+    "sparse_checkout": [
+      "account-service/src/main/java/com/ccabc/account/web/",
+      "account-service/src/main/java/com/ccabc/account/service/",
+      "account-service/src/main/java/com/ccabc/account/theme/",
+      "account-service/src/main/java/com/ccabc/account/security/",
+      "account-service/src/test/java/com/ccabc/account/",
+      "shared-web/src/main/java/com/ccabc/web/UrlAllowlistValidator.java",
+      "docs/adr/"
+    ],
+    "branch_namespace": "guardian/RC-CCABC-2211-a1/*",
+    "egress_allowlist": ["nexus.corp.internal:443", "agent-control-plane.corp.internal:443"],
+    "credential_scope": {
+      "repos": ["ccabc/account-service"],
+      "permissions": ["contents:write:guardian/RC-CCABC-2211-a1/*", "pull_requests:write"],
+      "ttl_minutes": 90
+    },
+    "readonly_mounts": [
+      "account-service/src/test/java/com/ccabc/account/AccountStatementCharacterizationTest.java",
+      ".guardian/"
+    ]
+  },
+
+  "budget": {
+    "wall_clock_min": 90,
+    "iterations": 3,
+    "max_tool_calls": 400,
+    "allowed_dependency_changes": []
+  },
+
+  "escalation": {
+    "instruction": "If a correct fix requires anything outside change_surface.allow, violates any must_remain_true invariant, or requires a forbidden operation, emit BLOCKED with the report fields below. Do NOT partially apply, do NOT improvise, do NOT weaken any control to make progress.",
+    "reasons": ["SURFACE_TOO_NARROW", "INVARIANT_CONFLICT", "FORBIDDEN_OP_REQUIRED", "MISSING_CONTEXT", "BUDGET_EXHAUSTED", "AMBIGUOUS_INTENT"],
+    "report_fields": ["blocked_reason", "analysis", "attempted_approaches", "required_surface_expansion", "invariant_conflict", "recommended_human_action"],
+    "scoring": "An accurate BLOCKED report is recorded as a SUCCESSFUL outcome for the agent's historical success rate. A gate rejection is recorded as a FAILURE."
+  },
+
+  "provenance_requirements": {"hunk_rationale_required": true, "signed_commits": true},
+
+  "risk": {
+    "blast_radius": 68,
+    "band": "HIGH",
+    "effort_tier": "T3",
+    "expected_review_tier": "SECURITY_ARCHITECT"
+  }
+}

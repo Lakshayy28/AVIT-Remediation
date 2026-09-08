@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ccabc.corp/guardian-avit/schemas/gating-verification-result.schema.json",
+  "title": "Gating Verification Result",
+  "description": "Immutable record of one full evaluation of a submitted patch. Written to the WORM evidence store. Every merge decision in the platform must be reconstructible from this document alone.",
+  "type": "object",
+  "required": ["result_id", "contract_id", "patch", "evaluated_at", "gates", "semantic_diff", "verdict", "evidence"],
+  "additionalProperties": false,
+  "properties": {
+    "result_id":    {"type": "string", "pattern": "^GVR-[A-Z0-9]+-[0-9]+-a[0-9]+$"},
+    "contract_id":  {"type": "string"},
+    "fix_unit":     {"type": "string"},
+    "batch":        {"type": "string"},
+    "attempt":      {"type": "integer"},
+    "evaluated_at": {"type": "string", "format": "date-time"},
+    "engine_version": {"type": "string"},
+    "policy_version": {"type": "string"},
+    "graph_snapshot_id": {"type": "string",
+      "description": "Verdicts computed against a stale snapshot are invalidated and re-run"},
+
+    "patch": {
+      "type": "object",
+      "required": ["bundle_uri", "sha256", "files_changed", "base_commit"],
+      "properties": {
+        "bundle_uri":    {"type": "string", "format": "uri"},
+        "sha256":        {"type": "string"},
+        "base_commit":   {"type": "string"},
+        "files_changed": {"type": "array", "items": {"type": "string"}},
+        "lines_added":   {"type": "integer"},
+        "lines_removed": {"type": "integer"},
+        "agent":         {"type": "string"},
+        "agent_outcome": {"enum": ["PATCH_SUBMITTED", "BLOCKED", "BUDGET_EXHAUSTED"]},
+        "blocked_report":{"type": ["object", "null"],
+          "properties": {
+            "blocked_reason": {"enum": ["SURFACE_TOO_NARROW","INVARIANT_CONFLICT","FORBIDDEN_OP_REQUIRED",
+                                        "MISSING_CONTEXT","BUDGET_EXHAUSTED","AMBIGUOUS_INTENT"]},
+            "analysis": {"type": "string"},
+            "attempted_approaches": {"type": "array", "items": {"type": "object"}},
+            "required_surface_expansion": {"type": "array", "items": {"type": "string"}},
+            "recommended_human_action": {"type": "string"}
+          }},
+        "hunk_rationale": {"type": "array", "items": {
+          "type": "object",
+          "properties": {"hunk": {"type": "string"}, "contract_clause": {"type": "string"}, "rationale": {"type": "string"}}}}
+      }
+    },
+
+    "gates": {
+      "type": "array",
+      "description": "Ordered G0..G8. Execution is fail-fast; unrun stages are recorded with status SKIPPED so the record is never ambiguous about what was and was not checked.",
+      "items": {
+        "type": "object",
+        "required": ["gate", "status", "duration_ms"],
+        "properties": {
+          "gate":   {"enum": ["G0","G1","G2","G3","G4","G5","G6","G7","G8"]},
+          "name":   {"type": "string"},
+          "status": {"enum": ["PASS","FAIL","SKIPPED","ERROR"]},
+          "duration_ms": {"type": "integer"},
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["check_id", "status"],
+              "properties": {
+                "check_id":  {"type": "string", "examples": ["G0.3", "AC-AUTHZ-03", "G3.unlisted_case_change"]},
+                "status":    {"enum": ["PASS","FAIL","WARN","SKIPPED"]},
+                "severity":  {"enum": ["BLOCKER","REVIEW","INFO"]},
+                "message":   {"type": "string"},
+                "location":  {"type": "string"},
+                "observed":  {"type": "string"},
+                "expected":  {"type": "string"},
+                "invariant_violated": {"type": "string"},
+                "exemplar":  {"type": "string", "description": "Pointer to the in-repo correct pattern; feeds the structured rejection"}
+              }
+            }
+          },
+          "artefact_uris": {"type": "array", "items": {"type": "string", "format": "uri"}}
+        }
+      }
+    },
+
+    "semantic_diff": {
+      "type": "object",
+      "required": ["facts", "detector_findings"],
+      "properties": {
+        "facts": {
+          "type": "array",
+          "description": "Language-neutral PatchFacts — the shared vocabulary that lets one detector catalogue govern six runtimes",
+          "items": {
+            "type": "object",
+            "required": ["fact", "symbol"],
+            "properties": {
+              "fact":     {"type": "string", "examples": ["ANNOTATION_REMOVED","EXCEPTION_HANDLER_BROADENED","TXN_ATTRIBUTE_CHANGED","GUARD_CLAUSE_ADDED"]},
+              "symbol":   {"type": "string"},
+              "language": {"type": "string"},
+              "prev":     {}, "next": {},
+              "detail":   {"type": "object"}
+            }
+          }
+        },
+        "detector_findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["detector", "severity", "message"],
+            "properties": {
+              "detector":  {"type": "string", "examples": ["AC-AUTHZ-03","AC-ERR-04","AC-TST-03"]},
+              "family":    {"type": "string"},
+              "severity":  {"enum": ["BLOCKER","REVIEW","INFO"]},
+              "message":   {"type": "string"},
+              "location":  {"type": "string"},
+              "invariant_violated": {"type": "string"},
+              "runtime_evidence": {"type": "string"}
+            }
+          }
+        },
+        "graph_delta": {
+          "type": "object",
+          "properties": {
+            "edges_added":   {"type": "integer"},
+            "edges_removed": {"type": "integer"},
+            "ingress_paths_severed": {"type": "array", "items": {"type": "string"},
+              "description": "Feeds AC-CAP-03: making vulnerable code unreachable is a capability removal, not a fix"},
+            "new_cross_component_edges": {"type": "array", "items": {"type": "string"}},
+            "zones_touched": {"type": "array", "items": {"type": "string"}}
+          }
+        }
+      }
+    },
+
+    "characterization": {
+      "type": "object",
+      "properties": {
+        "total_cases":        {"type": "integer"},
+        "identical":          {"type": "integer"},
+        "changed":            {"type": "integer"},
+        "expected_delta_met":     {"type": "array", "items": {"type": "string"}},
+        "expected_delta_unmet":   {"type": "array", "items": {"type": "string"},
+                                   "description": "Declared change did NOT occur ⇒ the fix did not land ⇒ REJECT"},
+        "unlisted_changes":       {"type": "array", "items": {
+          "type": "object",
+          "properties": {"case_id": {"type": "string"}, "recorded": {}, "observed": {}, "dimension": {"type": "string"}}},
+          "description": "Collateral damage ⇒ REJECT"},
+        "suite_hash_verified": {"type": "boolean"}
+      }
+    },
+
+    "oracle_review": {
+      "type": "object",
+      "description": "Advisory only. Per the trust boundary it may raise the review tier; it can never permit a merge or overrule a BLOCKER.",
+      "properties": {
+        "invoked":              {"type": "boolean"},
+        "model":                {"type": "string"},
+        "payload_sha256":       {"type": "string"},
+        "response_sha256":      {"type": "string"},
+        "behaviour_change_claims": {"type": "array", "items": {"type": "string"}},
+        "invariant_risk":       {"type": "array", "items": {"type": "object"}},
+        "confidence":           {"type": "number"},
+        "effect_on_verdict":    {"enum": ["NONE", "TIER_RAISED"],
+                                 "description": "TIER_RAISED is the only permitted effect"}
+      }
+    },
+
+    "risk": {
+      "type": "object",
+      "properties": {
+        "blast_radius": {"type": "integer"},
+        "band":         {"enum": ["LOW","MEDIUM","HIGH","CRITICAL"]},
+        "factors":      {"type": "object", "description": "Full decomposition — a score a reviewer cannot interrogate is a score they will ignore"},
+        "overrides_applied": {"type": "array", "items": {"type": "string"}},
+        "zones_touched": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+
+    "verdict": {
+      "type": "object",
+      "required": ["decision", "rationale", "decided_by"],
+      "properties": {
+        "decision":  {"enum": ["MERGE_AUTONOMOUS","PEER_REVIEW","SECURITY_ARCHITECT","REJECT_AND_REISSUE","HUMAN_FIX"]},
+        "rationale": {"type": "string"},
+        "matched_rule": {"type": "string", "description": "The triage-matrix row that fired"},
+        "decided_by": {"type": "string", "examples": ["opa/guardian-triage@2026.09"]},
+        "blocker_count": {"type": "integer"},
+        "gates_failed":  {"type": "array", "items": {"type": "string"}},
+        "attempts_remaining": {"type": "integer"},
+        "required_reviewers": {"type": "array", "items": {"type": "string"}},
+        "structured_rejection": {
+          "type": ["object","null"],
+          "description": "Machine-readable feedback so attempt 2 is a constrained repair, not a fresh guess",
+          "properties": {
+            "blockers": {"type": "array", "items": {"type": "object"}},
+            "guidance": {"type": "string"},
+            "surface_unchanged": {"type": "boolean"}
+          }
+        }
+      }
+    },
+
+    "merge": {
+      "type": "object",
+      "properties": {
+        "merged":            {"type": "boolean"},
+        "merge_commit":      {"type": "string"},
+        "rebase_reverified": {"type": "boolean",
+          "description": "G1–G4 re-run against the rebased result. A patch verified against a stale main is unverified."},
+        "approvers":         {"type": "array", "items": {"type": "string"}},
+        "canary":            {"type": "object",
+          "properties": {"stages": {"type": "array", "items": {"type": "string"}}, "outcome": {"type": "string"}}},
+        "slo_watch": {"type": "object",
+          "properties": {
+            "window_hours": {"type": "integer"},
+            "metrics":      {"type": "array", "items": {"type": "string"},
+                             "description": "Includes auth_failure_rate — an over-corrected authz fix looks 'healthy' to error-rate monitoring"},
+            "outcome":      {"enum": ["HEALTHY","REVERTED"]}}},
+        "post_merge_scan": {"type": "object",
+          "properties": {"mythos": {"type": "string"}, "checkmarx": {"type": "string"},
+                         "blackduck": {"type": "string"}, "prisma": {"type": "string"}}}
+      }
+    },
+
+    "evidence": {
+      "type": "object",
+      "required": ["bundle_uri", "sealed"],
+      "properties": {
+        "bundle_uri": {"type": "string", "format": "uri"},
+        "sealed":     {"type": "boolean"},
+        "sha256":     {"type": "string"},
+        "retention_years": {"type": "integer", "default": 7}
+      }
+    }
+  }
+}
